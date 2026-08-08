@@ -35,7 +35,7 @@ export const INITIAL_ADMIN = {
 
 const SESSION_COOKIE = "dukyoung_alumni_session";
 const SESSION_LIFETIME_SECONDS = 60 * 60 * 24 * 7;
-const PBKDF2_ITERATIONS = 150_000;
+const PBKDF2_ITERATIONS = 100_000;
 let initializePromise: Promise<void> | null = null;
 
 function now() {
