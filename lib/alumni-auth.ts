@@ -30,7 +30,6 @@ type MemberRow = SafeMember & { passwordHash: string; passwordSalt: string };
 
 export const INITIAL_ADMIN = {
   email: "admin@dukyoung-alumni.local",
-  password: "Dukyoung!2026",
   name: "총동문회 관리자",
 } as const;
 
@@ -78,6 +77,15 @@ async function passwordHash(password: string, salt: string) {
 async function createPasswordRecord(password: string) {
   const salt = bytesToBase64(crypto.getRandomValues(new Uint8Array(16)));
   return { passwordSalt: salt, passwordHash: await passwordHash(password, salt) };
+}
+
+async function getInitialAdministratorPassword() {
+  const { env } = await import("cloudflare:workers");
+  const password = (env as unknown as Record<string, unknown>).INITIAL_ADMIN_PASSWORD;
+  if (typeof password !== "string" || password.length < 12) {
+    throw new Error("초기 관리자 비밀번호가 설정되지 않았습니다.");
+  }
+  return password;
 }
 
 function asSafeMember(row: MemberRow): SafeMember {
@@ -133,7 +141,7 @@ export async function ensureAlumniDatabase() {
 
       const existingAdmin = await database.prepare("SELECT id FROM alumni_users WHERE email = ?").bind(INITIAL_ADMIN.email).first<{ id: string }>();
       if (!existingAdmin) {
-        const credentials = await createPasswordRecord(INITIAL_ADMIN.password);
+        const credentials = await createPasswordRecord(await getInitialAdministratorPassword());
         await database.prepare(`INSERT INTO alumni_users (id, name, email, password_hash, password_salt, graduation_year, department, directory_consent, role, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
           .bind("initial-admin", INITIAL_ADMIN.name, INITIAL_ADMIN.email, credentials.passwordHash, credentials.passwordSalt, "관리자", "총동문회 사무국", 0, "admin", now()).run();
       }
