@@ -79,15 +79,6 @@ async function createPasswordRecord(password: string) {
   return { passwordSalt: salt, passwordHash: await passwordHash(password, salt) };
 }
 
-async function getInitialAdministratorPassword() {
-  const { env } = await import("cloudflare:workers");
-  const password = (env as unknown as Record<string, unknown>).INITIAL_ADMIN_PASSWORD;
-  if (typeof password !== "string" || password.length < 12) {
-    throw new Error("초기 관리자 비밀번호가 설정되지 않았습니다.");
-  }
-  return password;
-}
-
 function asSafeMember(row: MemberRow): SafeMember {
   return {
     id: row.id,
@@ -129,9 +120,11 @@ export async function ensureAlumniDatabase() {
 
       const existingAdmin = await database.prepare("SELECT id FROM alumni_users WHERE email = ?").bind(INITIAL_ADMIN.email).first<{ id: string }>();
       if (!existingAdmin) {
-        const credentials = await createPasswordRecord(await getInitialAdministratorPassword());
-        await database.prepare(`INSERT INTO alumni_users (id, name, email, password_hash, password_salt, graduation_year, department, directory_consent, role, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+        const initialPassword = randomToken(24);
+        const credentials = await createPasswordRecord(initialPassword);
+        await database.prepare(`INSERT INTO alumni_users (id, name, email, password_hash, password_salt, graduation_year, department, directory_consent, role, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`) 
           .bind("initial-admin", INITIAL_ADMIN.name, INITIAL_ADMIN.email, credentials.passwordHash, credentials.passwordSalt, "관리자", "총동문회 사무국", 0, "admin", now()).run();
+        console.info(`[alumni] Initial administrator created for ${INITIAL_ADMIN.email}. One-time password: ${initialPassword}`);
       }
 
       const contentCount = await database.prepare("SELECT COUNT(*) AS count FROM alumni_content").first<{ count: number }>();
