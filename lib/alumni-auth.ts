@@ -105,39 +105,27 @@ export async function ensureAlumniDatabase() {
   if (!initializePromise) {
     initializePromise = (async () => {
       const database = await getDatabase();
-      await database.exec(`
-        CREATE TABLE IF NOT EXISTS alumni_users (
-          id TEXT PRIMARY KEY,
-          name TEXT NOT NULL,
-          email TEXT NOT NULL UNIQUE,
-          password_hash TEXT NOT NULL,
-          password_salt TEXT NOT NULL,
-          graduation_year TEXT NOT NULL,
-          department TEXT NOT NULL DEFAULT '',
-          directory_consent INTEGER NOT NULL DEFAULT 0,
-          role TEXT NOT NULL DEFAULT 'member',
+      await database.batch([
+        database.prepare(`CREATE TABLE IF NOT EXISTS alumni_users (
+          id TEXT PRIMARY KEY, name TEXT NOT NULL, email TEXT NOT NULL UNIQUE,
+          password_hash TEXT NOT NULL, password_salt TEXT NOT NULL,
+          graduation_year TEXT NOT NULL, department TEXT NOT NULL DEFAULT '',
+          directory_consent INTEGER NOT NULL DEFAULT 0, role TEXT NOT NULL DEFAULT 'member',
           created_at TEXT NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS alumni_sessions (
-          token_hash TEXT PRIMARY KEY,
-          user_id TEXT NOT NULL,
-          expires_at TEXT NOT NULL,
-          created_at TEXT NOT NULL,
-          FOREIGN KEY(user_id) REFERENCES alumni_users(id) ON DELETE CASCADE
-        );
-        CREATE TABLE IF NOT EXISTS alumni_content (
-          id TEXT PRIMARY KEY,
-          category TEXT NOT NULL,
-          title TEXT NOT NULL,
-          body TEXT NOT NULL DEFAULT '',
-          event_date TEXT,
-          published INTEGER NOT NULL DEFAULT 1,
-          created_at TEXT NOT NULL,
-          updated_at TEXT NOT NULL
-        );
-        CREATE INDEX IF NOT EXISTS alumni_content_public_idx ON alumni_content(category, published, updated_at DESC);
-        CREATE INDEX IF NOT EXISTS alumni_sessions_user_idx ON alumni_sessions(user_id, expires_at);
-      `);
+        )`),
+        database.prepare(`CREATE TABLE IF NOT EXISTS alumni_sessions (
+          token_hash TEXT PRIMARY KEY, user_id TEXT NOT NULL, expires_at TEXT NOT NULL,
+          created_at TEXT NOT NULL, FOREIGN KEY(user_id) REFERENCES alumni_users(id) ON DELETE CASCADE
+        )`),
+        database.prepare(`CREATE TABLE IF NOT EXISTS alumni_content (
+          id TEXT PRIMARY KEY, category TEXT NOT NULL, title TEXT NOT NULL,
+          body TEXT NOT NULL DEFAULT '', event_date TEXT, published INTEGER NOT NULL DEFAULT 1,
+          created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+        )`),
+        database.prepare("CREATE INDEX IF NOT EXISTS alumni_content_public_idx ON alumni_content(category, published, updated_at DESC)"),
+        database.prepare("CREATE INDEX IF NOT EXISTS alumni_sessions_user_idx ON alumni_sessions(user_id, expires_at)"),
+        database.prepare("PRAGMA optimize"),
+      ]);
 
       const existingAdmin = await database.prepare("SELECT id FROM alumni_users WHERE email = ?").bind(INITIAL_ADMIN.email).first<{ id: string }>();
       if (!existingAdmin) {
