@@ -1,0 +1,13 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "framework": null,
+  "buildCommand": "echo 'Vercel relay deployment'",
+  "outputDirectory": "vercel-static",
+  "redirects": [
+    {
+      "source": "/:path*",
+      "destination": "https://dukyoung-alumni-association.v0-55d3.chatgpt.site/:path*",
+      "permanent": false
+    }
+  ]
+}
