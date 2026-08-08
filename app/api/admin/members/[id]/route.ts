@@ -8,7 +8,7 @@ export async function PATCH(request: Request, { params }: Context) {
     const payload = await request.json() as Record<string, unknown>;
     await updateMember((await params).id, {
       name: typeof payload.name === "string" ? payload.name : undefined,
-      email: typeof payload.email === "string" ? payload.email : undefined,
+      loginId: typeof payload.loginId === "string" ? payload.loginId : undefined,
       graduationYear: typeof payload.graduationYear === "string" ? payload.graduationYear : undefined,
       department: typeof payload.department === "string" ? payload.department : undefined,
       directoryConsent: typeof payload.directoryConsent === "boolean" ? payload.directoryConsent : undefined,

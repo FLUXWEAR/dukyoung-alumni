@@ -5,7 +5,7 @@ export type MemberRole = "member" | "admin";
 export type SafeMember = {
   id: string;
   name: string;
-  email: string;
+  loginId: string;
   graduationYear: string;
   department: string;
   directoryConsent: boolean;
@@ -29,7 +29,7 @@ export type AlumniContent = {
 type MemberRow = SafeMember & { passwordHash: string; passwordSalt: string };
 
 export const INITIAL_ADMIN = {
-  email: "admin@dukyoung-alumni.local",
+  loginId: "admin",
   name: "총동문회 관리자",
 } as const;
 
@@ -42,8 +42,14 @@ function now() {
   return new Date().toISOString();
 }
 
-function normalizeEmail(value: string) {
+function normalizeLoginId(value: string) {
   return value.trim().toLowerCase();
+}
+
+function validateLoginId(loginId: string) {
+  if (!/^[a-z0-9][a-z0-9._-]{3,19}$/.test(loginId)) {
+    throw new Error("아이디는 영문 소문자, 숫자, ., _, -를 사용해 4~20자로 입력해주세요.");
+  }
 }
 
 function bytesToBase64(bytes: Uint8Array) {
@@ -83,7 +89,7 @@ function asSafeMember(row: MemberRow): SafeMember {
   return {
     id: row.id,
     name: row.name,
-    email: row.email,
+    loginId: row.loginId,
     graduationYear: row.graduationYear,
     department: row.department,
     directoryConsent: Boolean(row.directoryConsent),
@@ -99,6 +105,7 @@ export async function ensureAlumniDatabase() {
       await database.batch([
         database.prepare(`CREATE TABLE IF NOT EXISTS alumni_users (
           id TEXT PRIMARY KEY, name TEXT NOT NULL, email TEXT NOT NULL UNIQUE,
+          login_id TEXT NOT NULL UNIQUE,
           password_hash TEXT NOT NULL, password_salt TEXT NOT NULL,
           graduation_year TEXT NOT NULL, department TEXT NOT NULL DEFAULT '',
           directory_consent INTEGER NOT NULL DEFAULT 0, role TEXT NOT NULL DEFAULT 'member',
@@ -115,17 +122,28 @@ export async function ensureAlumniDatabase() {
         )`),
         database.prepare("CREATE INDEX IF NOT EXISTS alumni_content_public_idx ON alumni_content(category, published, updated_at DESC)"),
         database.prepare("CREATE INDEX IF NOT EXISTS alumni_sessions_user_idx ON alumni_sessions(user_id, expires_at)"),
-        database.prepare("PRAGMA optimize"),
       ]);
 
-      const existingAdmin = await database.prepare("SELECT id FROM alumni_users WHERE email = ?").bind(INITIAL_ADMIN.email).first<{ id: string }>();
+      try {
+        await database.prepare("ALTER TABLE alumni_users ADD COLUMN login_id TEXT").run();
+      } catch (error) {
+        if (!(error instanceof Error) || !/duplicate column name/i.test(error.message)) throw error;
+      }
+      await database.prepare("UPDATE alumni_users SET login_id = email WHERE login_id IS NULL OR login_id = ''").run();
+      await database.prepare("CREATE UNIQUE INDEX IF NOT EXISTS alumni_users_login_id_unique_idx ON alumni_users(login_id)").run();
+
+      const existingAdmin = await database.prepare("SELECT id FROM alumni_users WHERE id = ?").bind("initial-admin").first<{ id: string }>();
       if (!existingAdmin) {
         const initialPassword = randomToken(24);
         const credentials = await createPasswordRecord(initialPassword);
-        await database.prepare(`INSERT INTO alumni_users (id, name, email, password_hash, password_salt, graduation_year, department, directory_consent, role, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`) 
-          .bind("initial-admin", INITIAL_ADMIN.name, INITIAL_ADMIN.email, credentials.passwordHash, credentials.passwordSalt, "관리자", "총동문회 사무국", 0, "admin", now()).run();
-        console.info(`[alumni] Initial administrator created for ${INITIAL_ADMIN.email}. One-time password: ${initialPassword}`);
+        await database.prepare(`INSERT INTO alumni_users (id, name, email, login_id, password_hash, password_salt, graduation_year, department, directory_consent, role, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+          .bind("initial-admin", INITIAL_ADMIN.name, INITIAL_ADMIN.loginId, INITIAL_ADMIN.loginId, credentials.passwordHash, credentials.passwordSalt, "관리자", "총동문회 사무국", 0, "admin", now()).run();
+        console.info(`[alumni] Initial administrator created for ${INITIAL_ADMIN.loginId}. One-time password: ${initialPassword}`);
+      } else {
+        await database.prepare("UPDATE alumni_users SET email = ?, login_id = ? WHERE id = ?").bind(INITIAL_ADMIN.loginId, INITIAL_ADMIN.loginId, "initial-admin").run();
       }
+
+      await database.prepare("PRAGMA optimize").run();
 
       const contentCount = await database.prepare("SELECT COUNT(*) AS count FROM alumni_content").first<{ count: number }>();
       if (!contentCount || Number(contentCount.count) === 0) {
@@ -166,7 +184,7 @@ export async function getAuthenticatedMember(request: Request): Promise<SafeMemb
   const token = readCookie(request, SESSION_COOKIE);
   if (!token) return null;
   const tokenHash = await sha256(token);
-  const row = await (await getDatabase()).prepare(`SELECT u.id, u.name, u.email, u.password_hash AS passwordHash, u.password_salt AS passwordSalt, u.graduation_year AS graduationYear, u.department, u.directory_consent AS directoryConsent, u.role, u.created_at AS createdAt FROM alumni_sessions s JOIN alumni_users u ON u.id = s.user_id WHERE s.token_hash = ? AND s.expires_at > ?`)
+  const row = await (await getDatabase()).prepare(`SELECT u.id, u.name, u.login_id AS loginId, u.password_hash AS passwordHash, u.password_salt AS passwordSalt, u.graduation_year AS graduationYear, u.department, u.directory_consent AS directoryConsent, u.role, u.created_at AS createdAt FROM alumni_sessions s JOIN alumni_users u ON u.id = s.user_id WHERE s.token_hash = ? AND s.expires_at > ?`)
     .bind(tokenHash, now()).first<MemberRow>();
   return row ? asSafeMember({ ...row, directoryConsent: Boolean(row.directoryConsent), role: row.role as MemberRole }) : null;
 }
@@ -177,35 +195,35 @@ export async function requireAdministrator(request: Request) {
   return member;
 }
 
-export async function registerAlumniMember(input: { name?: string; email?: string; password?: string; graduationYear?: string; department?: string; directoryConsent?: boolean }) {
+export async function registerAlumniMember(input: { name?: string; loginId?: string; password?: string; graduationYear?: string; department?: string; directoryConsent?: boolean }) {
   await ensureAlumniDatabase();
   const name = input.name?.trim() ?? "";
-  const email = normalizeEmail(input.email ?? "");
+  const loginId = normalizeLoginId(input.loginId ?? "");
   const password = input.password ?? "";
   if (name.length < 2) throw new Error("이름을 2자 이상 입력해주세요.");
-  if (!/^\S+@\S+\.\S+$/.test(email)) throw new Error("이메일 주소를 확인해주세요.");
+  validateLoginId(loginId);
   if (password.length < 10) throw new Error("비밀번호는 영문·숫자 등을 포함해 10자 이상 입력해주세요.");
   if (!input.graduationYear?.trim()) throw new Error("졸업기수를 선택해주세요.");
   const credentials = await createPasswordRecord(password);
-  const member: SafeMember = { id: crypto.randomUUID(), name, email, graduationYear: input.graduationYear.trim(), department: input.department?.trim() || "미입력", directoryConsent: Boolean(input.directoryConsent), role: "member", createdAt: now() };
+  const member: SafeMember = { id: crypto.randomUUID(), name, loginId, graduationYear: input.graduationYear.trim(), department: input.department?.trim() || "미입력", directoryConsent: Boolean(input.directoryConsent), role: "member", createdAt: now() };
   try {
-    await (await getDatabase()).prepare(`INSERT INTO alumni_users (id, name, email, password_hash, password_salt, graduation_year, department, directory_consent, role, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-      .bind(member.id, member.name, member.email, credentials.passwordHash, credentials.passwordSalt, member.graduationYear, member.department, member.directoryConsent ? 1 : 0, member.role, member.createdAt).run();
+    await (await getDatabase()).prepare(`INSERT INTO alumni_users (id, name, email, login_id, password_hash, password_salt, graduation_year, department, directory_consent, role, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .bind(member.id, member.name, member.loginId, member.loginId, credentials.passwordHash, credentials.passwordSalt, member.graduationYear, member.department, member.directoryConsent ? 1 : 0, member.role, member.createdAt).run();
   } catch (error) {
-    if (error instanceof Error && /unique/i.test(error.message)) throw new Error("이미 가입된 이메일입니다. 로그인해주세요.");
+    if (error instanceof Error && /unique/i.test(error.message)) throw new Error("이미 사용 중인 아이디입니다. 다른 아이디를 입력해주세요.");
     throw error;
   }
   return member;
 }
 
-export async function authenticateAlumniMember(emailInput: string, password: string, request: Request) {
+export async function authenticateAlumniMember(loginIdInput: string, password: string, request: Request) {
   await ensureAlumniDatabase();
-  const email = normalizeEmail(emailInput);
-  const row = await (await getDatabase()).prepare(`SELECT id, name, email, password_hash AS passwordHash, password_salt AS passwordSalt, graduation_year AS graduationYear, department, directory_consent AS directoryConsent, role, created_at AS createdAt FROM alumni_users WHERE email = ?`)
-    .bind(email).first<MemberRow>();
-  if (!row || !password) throw new Error("이메일 또는 비밀번호가 올바르지 않습니다.");
+  const loginId = normalizeLoginId(loginIdInput);
+  const row = await (await getDatabase()).prepare(`SELECT id, name, login_id AS loginId, password_hash AS passwordHash, password_salt AS passwordSalt, graduation_year AS graduationYear, department, directory_consent AS directoryConsent, role, created_at AS createdAt FROM alumni_users WHERE login_id = ?`)
+    .bind(loginId).first<MemberRow>();
+  if (!row || !password) throw new Error("아이디 또는 비밀번호가 올바르지 않습니다.");
   const expectedHash = await passwordHash(password, row.passwordSalt);
-  if (expectedHash !== row.passwordHash) throw new Error("이메일 또는 비밀번호가 올바르지 않습니다.");
+  if (expectedHash !== row.passwordHash) throw new Error("아이디 또는 비밀번호가 올바르지 않습니다.");
   const token = randomToken();
   const expiresAt = new Date(Date.now() + SESSION_LIFETIME_SECONDS * 1000).toISOString();
   await (await getDatabase()).prepare("DELETE FROM alumni_sessions WHERE user_id = ?").bind(row.id).run();
@@ -213,20 +231,21 @@ export async function authenticateAlumniMember(emailInput: string, password: str
   return { member: asSafeMember({ ...row, directoryConsent: Boolean(row.directoryConsent), role: row.role as MemberRole }), cookie: sessionCookie(token, request) };
 }
 
-export async function registerAdminManagedMember(input: { name?: string; email?: string; password?: string; graduationYear?: string; department?: string; role?: MemberRole; directoryConsent?: boolean }) {
+export async function registerAdminManagedMember(input: { name?: string; loginId?: string; password?: string; graduationYear?: string; department?: string; role?: MemberRole; directoryConsent?: boolean }) {
   await ensureAlumniDatabase();
   const name = input.name?.trim() ?? "";
-  const email = normalizeEmail(input.email ?? "");
+  const loginId = normalizeLoginId(input.loginId ?? "");
   const password = input.password ?? "";
   const role: MemberRole = input.role === "admin" ? "admin" : "member";
-  if (name.length < 2 || !/^\S+@\S+\.\S+$/.test(email) || password.length < 10) throw new Error("이름, 이메일, 10자 이상 비밀번호를 모두 확인해주세요.");
+  if (name.length < 2 || password.length < 10) throw new Error("이름과 10자 이상 비밀번호를 모두 확인해주세요.");
+  validateLoginId(loginId);
   const credentials = await createPasswordRecord(password);
-  const member: SafeMember = { id: crypto.randomUUID(), name, email, graduationYear: input.graduationYear?.trim() || "관리자 등록", department: input.department?.trim() || "미입력", directoryConsent: Boolean(input.directoryConsent), role, createdAt: now() };
+  const member: SafeMember = { id: crypto.randomUUID(), name, loginId, graduationYear: input.graduationYear?.trim() || "관리자 등록", department: input.department?.trim() || "미입력", directoryConsent: Boolean(input.directoryConsent), role, createdAt: now() };
   try {
-    await (await getDatabase()).prepare(`INSERT INTO alumni_users (id, name, email, password_hash, password_salt, graduation_year, department, directory_consent, role, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-      .bind(member.id, member.name, member.email, credentials.passwordHash, credentials.passwordSalt, member.graduationYear, member.department, member.directoryConsent ? 1 : 0, member.role, member.createdAt).run();
+    await (await getDatabase()).prepare(`INSERT INTO alumni_users (id, name, email, login_id, password_hash, password_salt, graduation_year, department, directory_consent, role, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .bind(member.id, member.name, member.loginId, member.loginId, credentials.passwordHash, credentials.passwordSalt, member.graduationYear, member.department, member.directoryConsent ? 1 : 0, member.role, member.createdAt).run();
   } catch (error) {
-    if (error instanceof Error && /unique/i.test(error.message)) throw new Error("이미 등록된 이메일입니다.");
+    if (error instanceof Error && /unique/i.test(error.message)) throw new Error("이미 사용 중인 아이디입니다.");
     throw error;
   }
   return member;
@@ -234,22 +253,22 @@ export async function registerAdminManagedMember(input: { name?: string; email?:
 
 export async function listMembers() {
   await ensureAlumniDatabase();
-  const result = await (await getDatabase()).prepare(`SELECT id, name, email, graduation_year AS graduationYear, department, directory_consent AS directoryConsent, role, created_at AS createdAt FROM alumni_users ORDER BY CASE WHEN role = 'admin' THEN 0 ELSE 1 END, created_at DESC`).all<SafeMember>();
+  const result = await (await getDatabase()).prepare(`SELECT id, name, login_id AS loginId, graduation_year AS graduationYear, department, directory_consent AS directoryConsent, role, created_at AS createdAt FROM alumni_users ORDER BY CASE WHEN role = 'admin' THEN 0 ELSE 1 END, created_at DESC`).all<SafeMember>();
   return result.results.map((member) => ({ ...member, directoryConsent: Boolean(member.directoryConsent), role: member.role as MemberRole }));
 }
 
-export async function updateMember(id: string, input: Partial<Pick<SafeMember, "name" | "email" | "graduationYear" | "department" | "directoryConsent" | "role">> & { password?: string }, actor: SafeMember) {
+export async function updateMember(id: string, input: Partial<Pick<SafeMember, "name" | "loginId" | "graduationYear" | "department" | "directoryConsent" | "role">> & { password?: string }, actor: SafeMember) {
   await ensureAlumniDatabase();
-  const current = await (await getDatabase()).prepare(`SELECT id, name, email, graduation_year AS graduationYear, department, directory_consent AS directoryConsent, role, created_at AS createdAt FROM alumni_users WHERE id = ?`).bind(id).first<SafeMember>();
+  const current = await (await getDatabase()).prepare(`SELECT id, name, login_id AS loginId, graduation_year AS graduationYear, department, directory_consent AS directoryConsent, role, created_at AS createdAt FROM alumni_users WHERE id = ?`).bind(id).first<SafeMember>();
   if (!current) throw new Error("회원을 찾을 수 없습니다.");
   const nextRole: MemberRole = input.role === "admin" ? "admin" : input.role === "member" ? "member" : current.role as MemberRole;
   if (actor.id === id && nextRole !== "admin") throw new Error("현재 로그인한 관리자의 권한은 변경할 수 없습니다.");
-  const nextEmail = input.email === undefined ? current.email : normalizeEmail(input.email);
-  if (!/^\S+@\S+\.\S+$/.test(nextEmail)) throw new Error("이메일 주소를 확인해주세요.");
+  const nextLoginId = input.loginId === undefined ? current.loginId : normalizeLoginId(input.loginId);
+  validateLoginId(nextLoginId);
   if (input.password?.trim() && input.password.length < 10) throw new Error("새 비밀번호는 10자 이상 입력해주세요.");
   const credentials = input.password?.trim() ? await createPasswordRecord(input.password) : null;
-  await (await getDatabase()).prepare(`UPDATE alumni_users SET name = ?, email = ?, graduation_year = ?, department = ?, directory_consent = ?, role = ? WHERE id = ?`)
-    .bind(input.name?.trim() || current.name, nextEmail, input.graduationYear?.trim() || current.graduationYear, input.department?.trim() || current.department, input.directoryConsent === undefined ? Number(current.directoryConsent) : input.directoryConsent ? 1 : 0, nextRole, id).run();
+  await (await getDatabase()).prepare(`UPDATE alumni_users SET name = ?, email = ?, login_id = ?, graduation_year = ?, department = ?, directory_consent = ?, role = ? WHERE id = ?`)
+    .bind(input.name?.trim() || current.name, nextLoginId, nextLoginId, input.graduationYear?.trim() || current.graduationYear, input.department?.trim() || current.department, input.directoryConsent === undefined ? Number(current.directoryConsent) : input.directoryConsent ? 1 : 0, nextRole, id).run();
   if (credentials) {
     await (await getDatabase()).prepare("UPDATE alumni_users SET password_hash = ?, password_salt = ? WHERE id = ?").bind(credentials.passwordHash, credentials.passwordSalt, id).run();
     await (await getDatabase()).prepare("DELETE FROM alumni_sessions WHERE user_id = ?").bind(id).run();

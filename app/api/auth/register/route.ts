@@ -5,7 +5,7 @@ export async function POST(request: Request) {
     const payload = await request.json() as Record<string, unknown>;
     const member = await registerAlumniMember({
       name: typeof payload.name === "string" ? payload.name : "",
-      email: typeof payload.email === "string" ? payload.email : "",
+      loginId: typeof payload.loginId === "string" ? payload.loginId : "",
       password: typeof payload.password === "string" ? payload.password : "",
       graduationYear: typeof payload.graduationYear === "string" ? payload.graduationYear : "",
       department: typeof payload.department === "string" ? payload.department : "",
